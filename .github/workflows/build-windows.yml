@@ -91,6 +91,26 @@ jobs:
         Write-Host "libyuv directory contents:"
         Get-ChildItem "$vpxIncludeDir\libyuv"
 
+    - name: Create patch file for scrap build script
+      run: |
+        # 创建一个补丁文件来修改 scrap 构建脚本
+        $patchContent = @'
+// Fallback logic for GitHub Actions
+if !Path::new("D:\\\\vcpkg\\\\installed\\\\x64-windows-static\\\\include\\\\vpx\\\\vpx.h").exists() {
+    // Try to find libraries in alternative locations
+    if let Ok(alt_path) = std::env::var("VCPKG_ROOT") {
+        let alt_include = format!("{}\\\\installed\\\\x64-windows-static\\\\include", alt_path);
+        let alt_lib = format!("{}\\\\installed\\\\x64-windows-static\\\\lib", alt_path);
+        
+        if Path::new(&alt_include).exists() {
+            println!("cargo:include={}", alt_include);
+            println!("cargo:rustc-link-search={}", alt_lib);
+        }
+    }
+}
+'@
+        Set-Content -Path "patch_code.rs" -Value $patchContent
+
     - name: Patch scrap build script
       run: |
         # 修改 scrap 库的构建脚本以避免硬编码路径
@@ -105,25 +125,9 @@ jobs:
             # 替换硬编码的 vcpkg 路径
             $newContent = $content -replace "C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\\\\VC\\\\vcpkg\\\\installed\\\\x64-windows-static", "D:\\\\vcpkg\\\\installed\\\\x64-windows-static"
             
-            # 添加回退逻辑
-            $fallbackLogic = @'
-        // Fallback logic for GitHub Actions
-        if !Path::new("D:\\vcpkg\\installed\\x64-windows-static\\include\\vpx\\vpx.h").exists() {
-            // Try to find libraries in alternative locations
-            if let Ok(alt_path) = std::env::var("VCPKG_ROOT") {
-                let alt_include = format!("{}\\installed\\x64-windows-static\\include", alt_path);
-                let alt_lib = format!("{}\\installed\\x64-windows-static\\lib", alt_path);
-                
-                if Path::new(&alt_include).exists() {
-                    println!("cargo:include={}", alt_include);
-                    println!("cargo:rustc-link-search={}", alt_lib);
-                }
-            }
-        }
-'@
-            
             # 在适当的位置插入回退逻辑
-            $newContent = $newContent -replace "(fn link_homebrew_m1\(\) -> Result<\(\)> \{)", "`$1`n`n    $fallbackLogic`n"
+            $patchCode = Get-Content "patch_code.rs" -Raw
+            $newContent = $newContent -replace "(fn link_homebrew_m1\(\) -> Result<\(\)> \{)", "`$1`n`n    $patchCode`n"
             
             Set-Content $scrapBuildScript $newContent
             Write-Host "Patched scrap build script"
@@ -199,15 +203,15 @@ jobs:
         
         # 清理并重新构建
         cargo clean
-        cargo build --release --target ${{ matrix.target }} --features "system-libs" --verbose
+        cargo build --release --target ${{ matrix.target }} --verbose
 
-    - name: Final build attempt with vendored libraries
+    - name: Final build attempt with simplified approach
       if: failure()
       run: |
-        Write-Host "Final attempt: using vendored libraries..."
+        Write-Host "Final attempt: trying to build without specific features..."
         
-        # 尝试使用内置的库版本
-        cargo build --release --target ${{ matrix.target }} --no-default-features --features "vendored" --verbose
+        # 尝试使用更简单的构建方式
+        cargo build --release --target ${{ matrix.target }} --no-default-features --verbose
 
     - name: Collect build artifacts
       if: success()
