@@ -10,6 +10,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
+  CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG: true
 
 jobs:
   build-windows:
@@ -46,63 +47,97 @@ jobs:
         choco install git -y
         choco install perl -y
         choco install vcredist140 -y
-        # 安装预编译的 Opus 库
-        choco install opus -y
-        choco install opus-tools -y
 
-    - name: Setup Opus from system installation
+    - name: Install vcpkg and build dependencies
       run: |
-        # 查找系统安装的 Opus
-        $opusPaths = @(
-            "C:\Program Files\Opus",
-            "C:\Program Files (x86)\Opus",
-            "C:\opus"
-        )
+        # 安装 vcpkg
+        git clone https://github.com/microsoft/vcpkg.git D:\vcpkg
+        cd D:\vcpkg
+        .\bootstrap-vcpkg.bat -disableMetrics
         
-        foreach ($path in $opusPaths) {
-            if (Test-Path $path) {
-                echo "OPUS_ROOT=$path" >> $env:GITHUB_ENV
-                echo "Found Opus at: $path"
-                break
+        # 安装所有必要的库
+        .\vcpkg install opus:x64-windows-static
+        .\vcpkg install libyuv:x64-windows-static
+        .\vcpkg install libvpx:x64-windows-static
+        .\vcpkg install libvpx:x64-windows-static-md
+        
+        # 集成到系统
+        .\vcpkg integrate install
+        
+        echo "VCPKG_ROOT=D:\vcpkg" >> $env:GITHUB_ENV
+        echo "VCPKGRS_DYNAMIC=1" >> $env:GITHUB_ENV
+
+    - name: Create proper library directory structure
+      run: |
+        # 为 libvpx 创建正确的目录结构
+        $vcpkgDir = "D:\vcpkg\installed\x64-windows-static"
+        
+        # 创建 vpx 子目录并移动头文件
+        $vpxIncludeDir = "$vcpkgDir\include"
+        New-Item -ItemType Directory -Path "$vpxIncludeDir\vpx" -Force
+        Get-ChildItem "$vpxIncludeDir\*.h" | Where-Object { $_.Name -like "vpx*" } | ForEach-Object {
+            Copy-Item $_.FullName -Destination "$vpxIncludeDir\vpx\" -Force
+        }
+        
+        # 为 libyuv 创建目录结构
+        New-Item -ItemType Directory -Path "$vpxIncludeDir\libyuv" -Force
+        Get-ChildItem "$vpxIncludeDir\*.h" | Where-Object { $_.Name -like "*yuv*" } | ForEach-Object {
+            Copy-Item $_.FullName -Destination "$vpxIncludeDir\libyuv\" -Force
+        }
+        
+        Write-Host "Created library directory structure"
+        Write-Host "vpx directory contents:"
+        Get-ChildItem "$vpxIncludeDir\vpx"
+        Write-Host "libyuv directory contents:"
+        Get-ChildItem "$vpxIncludeDir\libyuv"
+
+    - name: Patch scrap build script
+      run: |
+        # 修改 scrap 库的构建脚本以避免硬编码路径
+        $scrapBuildScript = "libs\scrap\build.rs"
+        if (Test-Path $scrapBuildScript) {
+            # 备份原始文件
+            Copy-Item $scrapBuildScript "$scrapBuildScript.backup"
+            
+            # 读取内容
+            $content = Get-Content $scrapBuildScript -Raw
+            
+            # 替换硬编码的 vcpkg 路径
+            $newContent = $content -replace "C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\\\\VC\\\\vcpkg\\\\installed\\\\x64-windows-static", "D:\\\\vcpkg\\\\installed\\\\x64-windows-static"
+            
+            # 添加回退逻辑
+            $fallbackLogic = @'
+        // Fallback logic for GitHub Actions
+        if !Path::new("D:\\vcpkg\\installed\\x64-windows-static\\include\\vpx\\vpx.h").exists() {
+            // Try to find libraries in alternative locations
+            if let Ok(alt_path) = std::env::var("VCPKG_ROOT") {
+                let alt_include = format!("{}\\installed\\x64-windows-static\\include", alt_path);
+                let alt_lib = format!("{}\\installed\\x64-windows-static\\lib", alt_path);
+                
+                if Path::new(&alt_include).exists() {
+                    println!("cargo:include={}", alt_include);
+                    println!("cargo:rustc-link-search={}", alt_lib);
+                }
             }
         }
-        
-        # 如果没有找到，尝试通过 vcpkg 安装
-        if (-not $env:OPUS_ROOT) {
-            Write-Host "Installing Opus via vcpkg..."
-            git clone https://github.com/microsoft/vcpkg.git D:\vcpkg
-            cd D:\vcpkg
-            .\bootstrap-vcpkg.bat -disableMetrics
-            .\vcpkg install opus:x64-windows-static
-            echo "OPUS_ROOT=D:\vcpkg\installed\x64-windows-static" >> $env:GITHUB_ENV
+'@
+            
+            # 在适当的位置插入回退逻辑
+            $newContent = $newContent -replace "(fn link_homebrew_m1\(\) -> Result<\(\)> \{)", "`$1`n`n    $fallbackLogic`n"
+            
+            Set-Content $scrapBuildScript $newContent
+            Write-Host "Patched scrap build script"
         }
 
-    - name: Create required Opus directory structure
+    - name: Setup environment variables
       run: |
-        # 确保有 opus 子目录结构
-        $opusIncludeDir = "$env:OPUS_ROOT\include"
-        if (Test-Path $opusIncludeDir) {
-            # 创建 opus 子目录
-            $opusSubDir = "$opusIncludeDir\opus"
-            New-Item -ItemType Directory -Path $opusSubDir -Force
-            
-            # 移动所有头文件到 opus 子目录
-            Get-ChildItem "$opusIncludeDir\*.h" | ForEach-Object {
-                Copy-Item $_.FullName -Destination "$opusSubDir\" -Force
-            }
-            
-            Write-Host "Opus include structure created at: $opusSubDir"
-            Get-ChildItem $opusSubDir
-        }
-
-    - name: Setup environment variables for Opus
-      run: |
-        echo "LIBRARY_PATH=$env:OPUS_ROOT\lib;$env:LIBRARY_PATH" >> $env:GITHUB_ENV
-        echo "C_INCLUDE_PATH=$env:OPUS_ROOT\include;$env:C_INCLUDE_PATH" >> $env:GITHUB_ENV
-        echo "CPLUS_INCLUDE_PATH=$env:OPUS_ROOT\include;$env:CPLUS_INCLUDE_PATH" >> $env:GITHUB_ENV
+        $vcpkgDir = "D:\vcpkg\installed\x64-windows-static"
+        echo "LIBRARY_PATH=$vcpkgDir\lib;$env:LIBRARY_PATH" >> $env:GITHUB_ENV
+        echo "C_INCLUDE_PATH=$vcpkgDir\include;$env:C_INCLUDE_PATH" >> $env:GITHUB_ENV
+        echo "CPLUS_INCLUDE_PATH=$vcpkgDir\include;$env:CPLUS_INCLUDE_PATH" >> $env:GITHUB_ENV
         
-        # 设置 magnum-opus 特定的变量
-        echo "MAGNUM_OPUS_STATIC=1" >> $env:GITHUB_ENV
+        # 设置库特定的变量
+        echo "PKG_CONFIG_PATH=$vcpkgDir\lib\pkgconfig;$env:PKG_CONFIG_PATH" >> $env:GITHUB_ENV
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
@@ -131,49 +166,48 @@ jobs:
           echo "LLVM_PATH=$llvmPath" >> $env:GITHUB_ENV
         }
 
-    - name: Build RustDesk with explicit Opus paths
+    - name: Build RustDesk with vcpkg libraries
       run: |
         # 设置 Rust 链接器标志
-        $env:RUSTFLAGS = "-L $env:OPUS_ROOT\lib -l static=opus"
+        $env:RUSTFLAGS = "-L D:\vcpkg\installed\x64-windows-static\lib"
         
-        Write-Host "Building with OPUS_ROOT: $env:OPUS_ROOT"
+        Write-Host "Building with vcpkg libraries..."
         Write-Host "Library path: $env:LIBRARY_PATH"
         Write-Host "Include path: $env:C_INCLUDE_PATH"
         
         # 检查必要的头文件
-        if (Test-Path "$env:OPUS_ROOT\include\opus\opus_multistream.h") {
-            Write-Host "opus_multistream.h found!"
+        $vcpkgInclude = "D:\vcpkg\installed\x64-windows-static\include"
+        Write-Host "Checking for vpx/vp8.h..."
+        if (Test-Path "$vcpkgInclude\vpx\vp8.h") {
+            Write-Host "vpx/vp8.h found!"
         } else {
-            Write-Host "Warning: opus_multistream.h not found at expected location"
-            Write-Host "Available headers:"
-            Get-ChildItem "$env:OPUS_ROOT\include" -Recurse -Filter "*.h"
+            Write-Host "Available vpx headers:"
+            Get-ChildItem "$vcpkgInclude\vpx" -Filter "*.h" | ForEach-Object { Write-Host "  $($_.Name)" }
         }
         
         # 构建项目
         cargo build --release --target ${{ matrix.target }} --verbose
 
-    - name: Alternative approach - use vendored Opus
+    - name: Alternative build with system libraries
       if: failure()
       run: |
-        Write-Host "Trying vendored Opus approach..."
+        Write-Host "Trying alternative approach with system libraries..."
         
-        # 清理之前的构建
+        # 安装系统版本的库
+        choco install libvpx -y
+        choco install libyuv -y
+        
+        # 清理并重新构建
         cargo clean
-        
-        # 设置环境变量使用内置的 Opus
-        echo "MAGNUM_OPUS_STATIC=0" >> $env:GITHUB_ENV
-        $env:RUSTFLAGS = ""
-        
-        # 尝试禁用某些特性或使用默认设置
-        cargo build --release --target ${{ matrix.target }} --no-default-features --verbose
+        cargo build --release --target ${{ matrix.target }} --features "system-libs" --verbose
 
-    - name: Final build attempt
+    - name: Final build attempt with vendored libraries
       if: failure()
       run: |
-        Write-Host "Final attempt: building without Opus-specific features..."
+        Write-Host "Final attempt: using vendored libraries..."
         
-        # 尝试跳过某些依赖或使用替代实现
-        cargo build --release --target ${{ matrix.target }} --features "vendored-opus" --verbose
+        # 尝试使用内置的库版本
+        cargo build --release --target ${{ matrix.target }} --no-default-features --features "vendored" --verbose
 
     - name: Collect build artifacts
       if: success()
@@ -183,7 +217,6 @@ jobs:
         
         $releaseDir = "target\${{ matrix.target }}\release"
         
-        # 收集所有可执行文件和 DLL
         Get-ChildItem $releaseDir -Filter "*.exe" | ForEach-Object {
             Copy-Item $_.FullName -Destination "$artifactDir\$($_.Name)"
         }
@@ -205,5 +238,4 @@ jobs:
         Write-Host "=== Build Summary ==="
         Write-Host "Target: ${{ matrix.target }}"
         Write-Host "Rust version: $(rustc --version)"
-        Write-Host "Opus root: $env:OPUS_ROOT"
         Write-Host "Build status: $(if (Test-Path 'artifacts\*.exe') {'SUCCESS'} else {'FAILED'})"
