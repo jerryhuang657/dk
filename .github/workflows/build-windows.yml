@@ -9,6 +9,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  VCPKG_ROOT: D:\vcpkg
 
 jobs:
   build-windows:
@@ -16,18 +17,36 @@ jobs:
     
     strategy:
       matrix:
-        target: [x86_64-pc-windows-msvc] # 也可以添加 i686-pc-windows-msvc 用于32位
-    
+        target: [x86_64-pc-windows-msvc]
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        submodules: recursive # RustDesk 可能有子模块
+        submodules: recursive
 
     - name: Setup MSVC build environment
       uses: ilammy/msvc-dev-cmd@v1
       with:
         arch: x64
+
+    - name: Install vcpkg and dependencies
+      run: |
+        # 安装 vcpkg
+        git clone https://github.com/microsoft/vcpkg.git D:\vcpkg
+        cd D:\vcpkg
+        .\bootstrap-vcpkg.bat -disableMetrics
+        
+        # 安装 Opus 开发库（静态链接版本）
+        .\vcpkg install opus:x64-windows-static
+        .\vcpkg install opus:x64-windows-static-md  # 也安装动态链接版本以防万一
+        
+        # 安装其他可能的依赖
+        .\vcpkg install libyuv:x64-windows-static
+        .\vcpkg install libvpx:x64-windows-static
+        
+        # 集成到 Visual Studio
+        .\vcpkg integrate install
 
     - name: Setup Rust
       uses: actions-rs/toolchain@v1
@@ -42,93 +61,86 @@ jobs:
         choco upgrade -y llvm
         choco install nasm -y
         choco install cmake -y --installargs 'ADD_CMAKE_TO_PATH=System'
-        # 安装 Visual C++ 运行时（使用正确的包名）
-        choco install vcredist140 -y
-        choco install vcredist-all -y
+        choco install perl -y  # 某些构建脚本需要 Perl
 
-    - name: Setup Flutter (RustDesk 需要)
+    - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
         channel: stable
-        flutter-version: '3.19.5' # 指定一个稳定的版本
+        flutter-version: '3.19.5'
 
     - name: Find Flutter project directory
       id: find-flutter
       run: |
-        # 查找包含 pubspec.yaml 的目录
         $flutterDirs = Get-ChildItem -Recurse -Filter "pubspec.yaml" | Select-Object -First 1
         if ($flutterDirs) {
           $flutterDir = $flutterDirs.Directory.FullName
           Write-Host "Found Flutter project at: $flutterDir"
           echo "FLUTTER_DIR=$flutterDir" >> $env:GITHUB_ENV
-        } else {
-          Write-Host "No pubspec.yaml found, checking for lib/main.dart"
-          $dartDirs = Get-ChildItem -Recurse -Filter "main.dart" | Where-Object { $_.Directory.Name -eq "lib" } | Select-Object -First 1
-          if ($dartDirs) {
-            $flutterDir = $dartDirs.Directory.Parent.FullName
-            Write-Host "Found Flutter project at: $flutterDir"
-            echo "FLUTTER_DIR=$flutterDir" >> $env:GITHUB_ENV
-          } else {
-            Write-Host "No Flutter project found, continuing without Flutter"
-          }
         }
 
-    - name: Install Flutter dependencies (如果找到Flutter项目)
+    - name: Install Flutter dependencies
       if: env.FLUTTER_DIR != null
       run: |
         cd $env:FLUTTER_DIR
         flutter pub get
-        flutter --version
 
-    - name: Configure LLVM path
+    - name: Set vcpkg environment variables
       run: |
-        $llvmPath = "C:\Program Files\LLVM\bin"
-        if (Test-Path $llvmPath) {
-          echo "LLVM_PATH=$llvmPath" >> $env:GITHUB_ENV
-          $env:PATH = "$llvmPath;$env:PATH"
-          Write-Host "Added LLVM to PATH: $llvmPath"
+        echo "VCPKG_ROOT=D:\vcpkg" >> $env:GITHUB_ENV
+        echo "VCPKGRS_DYNAMIC=1" >> $env:GITHUB_ENV
+        
+        # 设置 vcpkg 工具链文件路径
+        $vcpkgToolchain = "D:\vcpkg\scripts\buildsystems\vcpkg.cmake"
+        echo "CMAKE_TOOLCHAIN_FILE=$vcpkgToolchain" >> $env:GITHUB_ENV
+        
+        # 添加到 PATH
+        $env:PATH = "D:\vcpkg;$env:PATH"
+
+    - name: Build RustDesk with vcpkg support
+      run: |
+        # 设置 vcpkg 相关环境变量
+        $env:VCPKG_ROOT = "D:\vcpkg"
+        $env:VCPKGRS_DYNAMIC = "1"
+        
+        # 检查 vcpkg 安装的 Opus 库
+        Write-Host "Checking vcpkg Opus installation..."
+        if (Test-Path "D:\vcpkg\installed\x64-windows-static\include\opus\opus_multistream.h") {
+          Write-Host "Opus multistream header found!"
         } else {
-          Write-Host "LLVM path not found, checking alternative locations"
-          $alternativePaths = @(
-            "C:\Program Files\LLVM",
-            "C:\tools\llvm"
-          )
-          foreach ($path in $alternativePaths) {
-            if (Test-Path $path) {
-              $binPath = "$path\bin"
-              echo "LLVM_PATH=$binPath" >> $env:GITHUB_ENV
-              $env:PATH = "$binPath;$env:PATH"
-              Write-Host "Added LLVM to PATH: $binPath"
-              break
-            }
-          }
-        }
-
-    - name: Build RustDesk
-      run: |
-        # 确保 LLVM 在 PATH 中
-        if ($env:LLVM_PATH) {
-          $env:PATH = "$env:LLVM_PATH;$env:PATH"
+          Write-Host "Opus multistream header not found, listing vcpkg contents:"
+          Get-ChildItem "D:\vcpkg\installed\x64-windows-static\include" -Recurse -Filter "*opus*"
         }
         
-        # 显示构建环境信息
-        cl.exe
-        link.exe
-        rustc --version
-        cargo --version
+        # 显示环境信息
+        Write-Host "VCPKG_ROOT: $env:VCPKG_ROOT"
+        Write-Host "VCPKGRS_DYNAMIC: $env:VCPKGRS_DYNAMIC"
         
         # 构建项目
         cargo build --release --target ${{ matrix.target }} --verbose
+
+    - name: Alternative build approach if vcpkg fails
+      if: failure()
+      run: |
+        # 如果 vcpkg 方法失败，尝试使用系统包管理器
+        Write-Host "Trying alternative approach with system packages..."
         
-        # 检查构建结果
-        if (Test-Path "target\${{ matrix.target }}\release\rustdesk.exe") {
-          Write-Host "Build successful! Binary found."
-        } else {
-          Write-Host "Build may have failed or binary has different name"
-          Get-ChildItem "target\${{ matrix.target }}\release\" -Filter "*.exe"
+        # 尝试使用 Chocolatey 安装 Opus
+        choco install opus -y --force
+        choco install opus-tools -y
+        
+        # 设置环境变量指向系统安装的 Opus
+        $opusPath = "C:\Program Files\Opus"
+        if (Test-Path $opusPath) {
+          echo "OPUS_ROOT=$opusPath" >> $env:GITHUB_ENV
+          $env:PATH = "$opusPath\bin;$env:PATH"
         }
+        
+        # 重新尝试构建
+        cargo build --release --target ${{ matrix.target }} --verbose
 
     - name: Collect build artifacts
+      if: success()
       run: |
         $artifactDir = "artifacts"
         New-Item -ItemType Directory -Path $artifactDir -Force
@@ -136,15 +148,8 @@ jobs:
         $releaseDir = "target\${{ matrix.target }}\release"
         
         # 复制可执行文件
-        if (Test-Path "$releaseDir\rustdesk.exe") {
-          Copy-Item "$releaseDir\rustdesk.exe" -Destination "$artifactDir\rustdesk.exe"
-        }
-        
-        # 复制可能的其他可执行文件
         Get-ChildItem $releaseDir -Filter "*.exe" | ForEach-Object {
-          if ($_.Name -ne "rustdesk.exe") {
-            Copy-Item $_.FullName -Destination "$artifactDir\$($_.Name)"
-          }
+          Copy-Item $_.FullName -Destination "$artifactDir\$($_.Name)"
         }
         
         # 复制 DLL 文件
@@ -152,7 +157,6 @@ jobs:
           Copy-Item $_.FullName -Destination "$artifactDir\$($_.Name)"
         }
         
-        # 显示收集的文件
         Write-Host "Collected artifacts:"
         Get-ChildItem $artifactDir
 
@@ -162,17 +166,3 @@ jobs:
         name: rustdesk-windows-${{ matrix.target }}
         path: artifacts/
         if-no-files-found: error
-
-    - name: Show build summary
-      run: |
-        Write-Host "=== Build Summary ==="
-        Write-Host "Target: ${{ matrix.target }}"
-        Write-Host "Rust version: $(rustc --version)"
-        Write-Host "Cargo version: $(cargo --version)"
-        if ($env:FLUTTER_DIR) {
-          Write-Host "Flutter project found at: $env:FLUTTER_DIR"
-          Write-Host "Flutter version: $(flutter --version)"
-        } else {
-          Write-Host "No Flutter project found"
-        }
-        Write-Host "Artifacts uploaded: rustdesk-windows-${{ matrix.target }}"
