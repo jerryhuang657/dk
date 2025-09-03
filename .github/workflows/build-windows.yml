@@ -5,11 +5,10 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:
+  workflow_dispatch: # 允许手动触发
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: full
 
 jobs:
   build-windows:
@@ -17,13 +16,13 @@ jobs:
     
     strategy:
       matrix:
-        target: [x86_64-pc-windows-msvc]
-
+        target: [x86_64-pc-windows-msvc] # 也可以添加 i686-pc-windows-msvc 用于32位
+    
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        submodules: recursive
+        submodules: recursive # RustDesk 可能有子模块
 
     - name: Setup MSVC build environment
       uses: ilammy/msvc-dev-cmd@v1
@@ -43,141 +42,117 @@ jobs:
         choco upgrade -y llvm
         choco install nasm -y
         choco install cmake -y --installargs 'ADD_CMAKE_TO_PATH=System'
-        choco install perl -y
-        choco install git -y
+        # 安装 Visual C++ 运行时（使用正确的包名）
+        choco install vcredist140 -y
+        choco install vcredist-all -y
 
-    - name: Build and install Opus from source
-      run: |
-        # 下载 Opus 源代码
-        git clone https://github.com/xiph/opus.git D:\opus-src
-        cd D:\opus-src
-        
-        # 创建构建目录
-        mkdir build
-        cd build
-        
-        # 使用 CMake 配置和构建
-        cmake .. -DCMAKE_INSTALL_PREFIX=D:\opus -DCMAKE_BUILD_TYPE=Release -DOPUS_BUILD_SHARED_LIBRARY=OFF -DOPUS_BUILD_TESTING=OFF
-        cmake --build . --config Release --target install
-        
-        # 检查安装结果
-        Write-Host "Opus installation contents:"
-        Get-ChildItem D:\opus -Recurse
+    - name: Setup Flutter (RustDesk 需要)
+      uses: subosito/flutter-action@v2
+      with:
+        channel: stable
+        flutter-version: '3.19.5' # 指定一个稳定的版本
 
-    - name: Setup Opus environment variables
+    - name: Find Flutter project directory
+      id: find-flutter
       run: |
-        # 设置 Opus 库路径
-        echo "OPUS_ROOT=D:\opus" >> $env:GITHUB_ENV
-        echo "OPUS_DIR=D:\opus" >> $env:GITHUB_ENV
-        
-        # 设置库搜索路径
-        echo "LIBRARY_PATH=D:\opus\lib;$env:LIBRARY_PATH" >> $env:GITHUB_ENV
-        echo "C_INCLUDE_PATH=D:\opus\include;$env:C_INCLUDE_PATH" >> $env:GITHUB_ENV
-        echo "CPLUS_INCLUDE_PATH=D:\opus\include;$env:CPLUS_INCLUDE_PATH" >> $env:GITHUB_ENV
-        
-        # 设置 magnum-opus 特定的环境变量
-        echo "MAGNUM_OPUS_STATIC=1" >> $env:GITHUB_ENV
-        echo "PKG_CONFIG_PATH=D:\opus\lib\pkgconfig;$env:PKG_CONFIG_PATH" >> $env:GITHUB_ENV
-
-    - name: Create symbolic link for magnum-opus
-      run: |
-        # 创建 opus 头文件目录结构
-        New-Item -ItemType Directory -Path "D:\opus\include\opus" -Force
-        
-        # 复制头文件到正确的位置
-        $opusIncludeDir = "D:\opus\include"
-        if (Test-Path "$opusIncludeDir\opus.h") {
-          Copy-Item "$opusIncludeDir\*.h" -Destination "$opusIncludeDir\opus\" -Force
-          Write-Host "Copied opus headers to opus subdirectory"
-        }
-        
-        # 检查头文件是否存在
-        Write-Host "Opus include directory contents:"
-        Get-ChildItem $opusIncludeDir -Recurse -Filter "*.h"
-
-    - name: Patch magnum-opus build script (临时解决方案)
-      run: |
-        # 找到 magnum-opus 目录并修改构建脚本
-        $magnumOpusDir = Get-ChildItem -Path $env:USERPROFILE\.cargo\git\checkouts -Recurse -Filter "magnum-opus-*" -Directory | Select-Object -First 1
-        if ($magnumOpusDir) {
-          $buildScript = Join-Path $magnumOpusDir.FullName "build.rs"
-          if (Test-Path $buildScript) {
-            Write-Host "Found magnum-opus build script at: $buildScript"
-            
-            # 备份原始文件
-            Copy-Item $buildScript "$buildScript.backup"
-            
-            # 修改硬编码的路径
-            $content = Get-Content $buildScript -Raw
-            $newContent = $content -replace "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\vcpkg\\installed\\x64-windows-static", "D:\opus"
-            Set-Content $buildScript $newContent
-            
-            Write-Host "Patched magnum-opus build script"
-          }
-        }
-
-    - name: Set custom linker flags
-      run: |
-        # 设置链接器标志
-        echo "RUSTFLAGS=-L D:\opus\lib -l static=opus" >> $env:GITHUB_ENV
-
-    - name: Build RustDesk with custom Opus paths
-      run: |
-        # 显示环境变量
-        Write-Host "OPUS_ROOT: $env:OPUS_ROOT"
-        Write-Host "LIBRARY_PATH: $env:LIBRARY_PATH"
-        Write-Host "C_INCLUDE_PATH: $env:C_INCLUDE_PATH"
-        
-        # 检查头文件是否存在
-        Write-Host "Checking for opus headers..."
-        if (Test-Path "D:\opus\include\opus\opus.h") {
-          Write-Host "opus.h found!"
-        }
-        if (Test-Path "D:\opus\include\opus\opus_multistream.h") {
-          Write-Host "opus_multistream.h found!"
+        # 查找包含 pubspec.yaml 的目录
+        $flutterDirs = Get-ChildItem -Recurse -Filter "pubspec.yaml" | Select-Object -First 1
+        if ($flutterDirs) {
+          $flutterDir = $flutterDirs.Directory.FullName
+          Write-Host "Found Flutter project at: $flutterDir"
+          echo "FLUTTER_DIR=$flutterDir" >> $env:GITHUB_ENV
         } else {
-          # 如果缺少 multistream.h，从源代码复制
-          Write-Host "opus_multistream.h not found, copying from source..."
-          if (Test-Path "D:\opus-src\include\opus_multistream.h") {
-            Copy-Item "D:\opus-src\include\opus_multistream.h" -Destination "D:\opus\include\opus\" -Force
-            Write-Host "Copied opus_multistream.h"
+          Write-Host "No pubspec.yaml found, checking for lib/main.dart"
+          $dartDirs = Get-ChildItem -Recurse -Filter "main.dart" | Where-Object { $_.Directory.Name -eq "lib" } | Select-Object -First 1
+          if ($dartDirs) {
+            $flutterDir = $dartDirs.Directory.Parent.FullName
+            Write-Host "Found Flutter project at: $flutterDir"
+            echo "FLUTTER_DIR=$flutterDir" >> $env:GITHUB_ENV
+          } else {
+            Write-Host "No Flutter project found, continuing without Flutter"
           }
         }
+
+    - name: Install Flutter dependencies (如果找到Flutter项目)
+      if: env.FLUTTER_DIR != null
+      run: |
+        cd $env:FLUTTER_DIR
+        flutter pub get
+        flutter --version
+
+    - name: Configure LLVM path
+      run: |
+        $llvmPath = "C:\Program Files\LLVM\bin"
+        if (Test-Path $llvmPath) {
+          echo "LLVM_PATH=$llvmPath" >> $env:GITHUB_ENV
+          $env:PATH = "$llvmPath;$env:PATH"
+          Write-Host "Added LLVM to PATH: $llvmPath"
+        } else {
+          Write-Host "LLVM path not found, checking alternative locations"
+          $alternativePaths = @(
+            "C:\Program Files\LLVM",
+            "C:\tools\llvm"
+          )
+          foreach ($path in $alternativePaths) {
+            if (Test-Path $path) {
+              $binPath = "$path\bin"
+              echo "LLVM_PATH=$binPath" >> $env:GITHUB_ENV
+              $env:PATH = "$binPath;$env:PATH"
+              Write-Host "Added LLVM to PATH: $binPath"
+              break
+            }
+          }
+        }
+
+    - name: Build RustDesk
+      run: |
+        # 确保 LLVM 在 PATH 中
+        if ($env:LLVM_PATH) {
+          $env:PATH = "$env:LLVM_PATH;$env:PATH"
+        }
+        
+        # 显示构建环境信息
+        cl.exe
+        link.exe
+        rustc --version
+        cargo --version
         
         # 构建项目
         cargo build --release --target ${{ matrix.target }} --verbose
-
-    - name: Alternative build with feature flags
-      if: failure()
-      run: |
-        # 如果仍然失败，尝试禁用某些特性或使用系统库
-        Write-Host "Trying alternative build approach..."
         
-        # 清理之前的构建
-        cargo clean
-        
-        # 使用系统库而不是静态链接
-        echo "MAGNUM_OPUS_STATIC=0" >> $env:GITHUB_ENV
-        
-        # 重新构建
-        cargo build --release --target ${{ matrix.target }} --features "system-opus" --verbose
+        # 检查构建结果
+        if (Test-Path "target\${{ matrix.target }}\release\rustdesk.exe") {
+          Write-Host "Build successful! Binary found."
+        } else {
+          Write-Host "Build may have failed or binary has different name"
+          Get-ChildItem "target\${{ matrix.target }}\release\" -Filter "*.exe"
+        }
 
     - name: Collect build artifacts
-      if: success()
       run: |
         $artifactDir = "artifacts"
         New-Item -ItemType Directory -Path $artifactDir -Force
         
         $releaseDir = "target\${{ matrix.target }}\release"
         
-        Get-ChildItem $releaseDir -Filter "*.exe" | ForEach-Object {
-          Copy-Item $_.FullName -Destination "$artifactDir\$($_.Name)"
+        # 复制可执行文件
+        if (Test-Path "$releaseDir\rustdesk.exe") {
+          Copy-Item "$releaseDir\rustdesk.exe" -Destination "$artifactDir\rustdesk.exe"
         }
         
+        # 复制可能的其他可执行文件
+        Get-ChildItem $releaseDir -Filter "*.exe" | ForEach-Object {
+          if ($_.Name -ne "rustdesk.exe") {
+            Copy-Item $_.FullName -Destination "$artifactDir\$($_.Name)"
+          }
+        }
+        
+        # 复制 DLL 文件
         Get-ChildItem $releaseDir -Filter "*.dll" | ForEach-Object {
           Copy-Item $_.FullName -Destination "$artifactDir\$($_.Name)"
         }
         
+        # 显示收集的文件
         Write-Host "Collected artifacts:"
         Get-ChildItem $artifactDir
 
@@ -187,3 +162,17 @@ jobs:
         name: rustdesk-windows-${{ matrix.target }}
         path: artifacts/
         if-no-files-found: error
+
+    - name: Show build summary
+      run: |
+        Write-Host "=== Build Summary ==="
+        Write-Host "Target: ${{ matrix.target }}"
+        Write-Host "Rust version: $(rustc --version)"
+        Write-Host "Cargo version: $(cargo --version)"
+        if ($env:FLUTTER_DIR) {
+          Write-Host "Flutter project found at: $env:FLUTTER_DIR"
+          Write-Host "Flutter version: $(flutter --version)"
+        } else {
+          Write-Host "No Flutter project found"
+        }
+        Write-Host "Artifacts uploaded: rustdesk-windows-${{ matrix.target }}"
