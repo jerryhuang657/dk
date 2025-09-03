@@ -47,31 +47,50 @@ jobs:
         choco install git -y
         choco install perl -y
         choco install vcredist140 -y
-        # 安装音频处理相关的依赖
-        choco install libsamplerate -y
 
-    - name: Install vcpkg and all required dependencies
+    - name: Build Opus from source with multistream support
+      run: |
+        # 下载 Opus 源代码
+        git clone https://github.com/xiph/opus.git D:\opus-src
+        cd D:\opus-src
+        
+        # 创建构建目录
+        mkdir build
+        cd build
+        
+        # 配置和构建 Opus，启用多流支持
+        cmake .. -DCMAKE_INSTALL_PREFIX=D:\opus -DCMAKE_BUILD_TYPE=Release -DOPUS_BUILD_SHARED_LIBRARY=OFF -DOPUS_BUILD_TESTING=OFF
+        cmake --build . --config Release --target install
+        
+        # 创建 opus 子目录并移动头文件
+        New-Item -ItemType Directory -Path "D:\opus\include\opus" -Force
+        Get-ChildItem "D:\opus\include\*.h" | ForEach-Object {
+            Copy-Item $_.FullName -Destination "D:\opus\include\opus\" -Force
+        }
+        
+        # 检查是否有多流头文件
+        Write-Host "Opus include directory contents:"
+        Get-ChildItem "D:\opus\include\opus" -Recurse
+
+    - name: Install other dependencies via vcpkg
       run: |
         # 安装 vcpkg
         git clone https://github.com/microsoft/vcpkg.git D:\vcpkg
         cd D:\vcpkg
         .\bootstrap-vcpkg.bat -disableMetrics
         
-        # 安装所有必要的库
-        .\vcpkg install opus:x64-windows-static
+        # 安装其他必要的库
         .\vcpkg install libyuv:x64-windows-static
         .\vcpkg install libvpx:x64-windows-static
         .\vcpkg install aom:x64-windows-static
         
-        # 集成到系统
         .\vcpkg integrate install
         
         echo "VCPKG_ROOT=D:\vcpkg" >> $env:GITHUB_ENV
-        echo "VCPKGRS_DYNAMIC=1" >> $env:GITHUB_ENV
 
     - name: Create proper library directory structure
       run: |
-        # 为所有库创建正确的目录结构
+        # 为其他库创建目录结构
         $vcpkgDir = "D:\vcpkg\installed\x64-windows-static"
         $includeDir = "$vcpkgDir\include"
         
@@ -92,16 +111,36 @@ jobs:
         Get-ChildItem "$includeDir\*.h" | Where-Object { $_.Name -like "aom*" } | ForEach-Object {
             Copy-Item $_.FullName -Destination "$includeDir\aom\" -Force
         }
-        
-        Write-Host "Created library directory structure"
 
-    - name: Setup environment variables
+    - name: Patch magnum-opus build script
       run: |
-        $vcpkgDir = "D:\vcpkg\installed\x64-windows-static"
-        echo "LIBRARY_PATH=$vcpkgDir\lib;$env:LIBRARY_PATH" >> $env:GITHUB_ENV
-        echo "C_INCLUDE_PATH=$vcpkgDir\include;$env:C_INCLUDE_PATH" >> $env:GITHUB_ENV
-        echo "CPLUS_INCLUDE_PATH=$vcpkgDir\include;$env:CPLUS_INCLUDE_PATH" >> $env:GITHUB_ENV
-        echo "PKG_CONFIG_PATH=$vcpkgDir\lib\pkgconfig;$env:PKG_CONFIG_PATH" >> $env:GITHUB_ENV
+        # 找到 magnum-opus 目录
+        $magnumOpusPath = "$env:USERPROFILE\.cargo\git\checkouts\magnum-opus-*"
+        $magnumOpusDir = Get-ChildItem -Path $magnumOpusPath -Directory | Select-Object -First 1
+        
+        if ($magnumOpusDir) {
+            $buildScript = Join-Path $magnumOpusDir.FullName "build.rs"
+            if (Test-Path $buildScript) {
+                # 备份原始文件
+                Copy-Item $buildScript "$buildScript.backup"
+                
+                # 读取内容
+                $content = Get-Content $buildScript -Raw
+                
+                # 替换硬编码的路径
+                $newContent = $content -replace "C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\\\\VC\\\\vcpkg\\\\installed\\\\x64-windows-static", "D:\\\\opus"
+                
+                Set-Content $buildScript $newContent
+                Write-Host "Patched magnum-opus build script"
+            }
+        }
+
+    - name: Setup environment variables for Opus
+      run: |
+        echo "OPUS_ROOT=D:\opus" >> $env:GITHUB_ENV
+        echo "LIBRARY_PATH=D:\opus\lib;$env:LIBRARY_PATH" >> $env:GITHUB_ENV
+        echo "C_INCLUDE_PATH=D:\opus\include;$env:C_INCLUDE_PATH" >> $env:GITHUB_ENV
+        echo "CPLUS_INCLUDE_PATH=D:\opus\include;$env:CPLUS_INCLUDE_PATH" >> $env:GITHUB_ENV
 
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
@@ -123,49 +162,32 @@ jobs:
         cd $env:FLUTTER_DIR
         flutter pub get
 
-    - name: Configure LLVM path
-      run: |
-        $llvmPath = "C:\Program Files\LLVM\bin"
-        if (Test-Path $llvmPath) {
-          echo "LLVM_PATH=$llvmPath" >> $env:GITHUB_ENV
-        }
-
-    - name: Build RustDesk with audio features enabled
+    - name: Build RustDesk with custom Opus
       run: |
         # 设置 Rust 链接器标志
-        $env:RUSTFLAGS = "-L D:\vcpkg\installed\x64-windows-static\lib"
+        $env:RUSTFLAGS = "-L D:\opus\lib -l static=opus"
         
-        Write-Host "Building with audio resampling features..."
+        Write-Host "Building with custom Opus installation..."
         
-        # 启用音频重采样特性
+        # 检查头文件
+        if (Test-Path "D:\opus\include\opus\opus_multistream.h") {
+            Write-Host "✓ opus_multistream.h found"
+        } else {
+            Write-Host "Available opus headers:"
+            Get-ChildItem "D:\opus\include\opus" | ForEach-Object { Write-Host "  $($_.Name)" }
+        }
+        
+        # 构建项目，启用音频特性
         cargo build --release --target ${{ matrix.target }} --features "use_dasp" --verbose
 
-    - name: Alternative build with samplerate feature
+    - name: Alternative build without audio
       if: failure()
       run: |
-        Write-Host "Trying alternative approach: using samplerate feature..."
+        Write-Host "Trying build without audio features..."
         cargo clean
         
-        # 尝试使用 samplerate 替代 dasp
-        cargo build --release --target ${{ matrix.target }} --features "use_samplerate" --verbose
-
-    - name: Build without audio resampling
-      if: failure()
-      run: |
-        Write-Host "Building without audio resampling features..."
-        cargo clean
-        
-        # 禁用音频重采样特性
+        # 禁用音频相关特性
         cargo build --release --target ${{ matrix.target }} --no-default-features --features "flutter" --verbose
-
-    - name: Final attempt - minimal build
-      if: failure()
-      run: |
-        Write-Host "Final attempt: minimal build with only essential features..."
-        cargo clean
-        
-        # 只启用最基本的特性
-        cargo build --release --target ${{ matrix.target }} --no-default-features --features "cli" --verbose
 
     - name: Collect build artifacts
       if: success()
