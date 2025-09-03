@@ -1,0 +1,65 @@
+name: Build RustDesk for Windows
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: # 允许手动触发
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    strategy:
+      matrix:
+        target: [x86_64-pc-windows-msvc] # 也可以添加 i686-pc-windows-msvc 用于32位
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive # RustDesk 可能有子模块
+
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        target: ${{ matrix.target }}
+        override: true
+        profile: minimal
+
+    - name: Install Windows build dependencies
+      run: |
+        choco install -y llvm
+        choco install -y vcredist2019
+
+    - name: Setup Flutter (RustDesk 需要)
+      uses: subosito/flutter-action@v2
+      with:
+        channel: stable
+
+    - name: Install Flutter dependencies
+      run: |
+        flutter pub get
+
+    - name: Build RustDesk
+      run: |
+        $env:PATH += ";C:\Program Files\LLVM\bin"
+        cargo build --release --target ${{ matrix.target }}
+        
+    - name: Collect build artifacts
+      run: |
+        mkdir artifacts
+        Copy-Item "target\${{ matrix.target }}\release\rustdesk.exe" -Destination "artifacts\rustdesk.exe"
+        Copy-Item "target\${{ matrix.target }}\release\rustdesk.*" -Destination "artifacts\" -Include "*.dll", "*.pdb"
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: rustdesk-windows-${{ matrix.target }}
+        path: artifacts/
+        if-no-files-found: error
