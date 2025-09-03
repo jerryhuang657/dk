@@ -39,6 +39,12 @@ jobs:
         choco install -y cmake --installargs 'ADD_CMAKE_TO_PATH=System'
         choco install -y git
 
+    - name: Clean up conflicting vcpkg environment
+      run: |
+        # 清除可能冲突的环境变量
+        $env:VCPKG_ROOT = "D:\vcpkg"
+        [Environment]::SetEnvironmentVariable("VCPKG_ROOT", $null, "Process")
+
     - name: Install vcpkg and Opus
       run: |
         # 安装 vcpkg
@@ -46,17 +52,47 @@ jobs:
         cd D:\vcpkg
         .\bootstrap-vcpkg.bat -disableMetrics
         
-        # 安装 Opus 并启用多流支持
-        .\vcpkg install opus[multistream]:x64-windows-static
+        # 安装 Opus（多流支持是默认包含的）
+        .\vcpkg install opus:x64-windows-static
         
         # 创建正确的目录结构
         $vcpkgDir = "D:\vcpkg\installed\x64-windows-static"
         $includeDir = "$vcpkgDir\include"
         
-        # 创建 opus 子目录
+        # 创建 opus 子目录并移动头文件
         New-Item -ItemType Directory -Path "$includeDir\opus" -Force
         Get-ChildItem "$includeDir\*.h" | Where-Object { $_.Name -like "opus*" } | ForEach-Object {
             Copy-Item $_.FullName -Destination "$includeDir\opus\" -Force
+        }
+        
+        Write-Host "Opus installation completed"
+        Write-Host "Opus headers:"
+        Get-ChildItem "$includeDir\opus"
+
+    - name: Build Opus from source as fallback
+      run: |
+        # 如果 vcpkg 安装的 Opus 没有多流头文件，从源码构建
+        if (-not (Test-Path "D:\vcpkg\installed\x64-windows-static\include\opus\opus_multistream.h")) {
+            Write-Host "Building Opus from source..."
+            git clone https://github.com/xiph/opus.git D:\opus-src
+            cd D:\opus-src
+            
+            mkdir build
+            cd build
+            
+            cmake .. -DCMAKE_INSTALL_PREFIX=D:\opus -DCMAKE_BUILD_TYPE=Release -DOPUS_BUILD_SHARED_LIBRARY=OFF
+            cmake --build . --config Release --target install
+            
+            # 创建 opus 子目录
+            New-Item -ItemType Directory -Path "D:\opus\include\opus" -Force
+            Get-ChildItem "D:\opus\include\*.h" | ForEach-Object {
+                Copy-Item $_.FullName -Destination "D:\opus\include\opus\" -Force
+            }
+            
+            # 更新环境变量指向源码构建的 Opus
+            echo "OPUS_ROOT=D:\opus" >> $env:GITHUB_ENV
+            echo "LIBRARY_PATH=D:\opus\lib;$env:LIBRARY_PATH" >> $env:GITHUB_ENV
+            echo "C_INCLUDE_PATH=D:\opus\include;$env:C_INCLUDE_PATH" >> $env:GITHUB_ENV
         }
 
     - name: Patch magnum-opus build script
@@ -72,31 +108,45 @@ jobs:
                 
                 # 读取并替换路径
                 $content = Get-Content $buildScript -Raw
+                
+                # 替换硬编码的路径
                 $newContent = $content -replace "C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\\\\VC\\\\vcpkg\\\\installed\\\\x64-windows-static", "D:\\\\vcpkg\\\\installed\\\\x64-windows-static"
+                
+                # 如果从源码构建了 Opus，使用那个路径
+                if (Test-Path "D:\opus\include\opus\opus_multistream.h") {
+                    $newContent = $newContent -replace "D:\\\\vcpkg\\\\installed\\\\x64-windows-static", "D:\\\\opus"
+                }
                 
                 Set-Content $buildScript $newContent
                 Write-Host "Successfully patched magnum-opus build script"
             }
         }
 
-    - name: Set environment variables
+    - name: Set final environment variables
       run: |
-        echo "VCPKGRS_DYNAMIC=1" >> $env:GITHUB_ENV
-        echo "LIBRARY_PATH=D:\vcpkg\installed\x64-windows-static\lib" >> $env:GITHUB_ENV
-        echo "C_INCLUDE_PATH=D:\vcpkg\installed\x64-windows-static\include" >> $env:GITHUB_ENV
+        # 确定使用哪个 Opus 安装
+        if (Test-Path "D:\opus\include\opus\opus_multistream.h") {
+            $opusPath = "D:\opus"
+        } else {
+            $opusPath = "D:\vcpkg\installed\x64-windows-static"
+        }
+        
+        echo "LIBRARY_PATH=$opusPath\lib" >> $env:GITHUB_ENV
+        echo "C_INCLUDE_PATH=$opusPath\include" >> $env:GITHUB_ENV
+        echo "RUSTFLAGS=-L $opusPath\lib" >> $env:GITHUB_ENV
+
+    - name: Verify Opus installation
+      run: |
+        Write-Host "Checking for opus_multistream.h..."
+        if (Test-Path "D:\vcpkg\installed\x64-windows-static\include\opus\opus_multistream.h") {
+            Write-Host "✓ Found in vcpkg installation"
+        }
+        if (Test-Path "D:\opus\include\opus\opus_multistream.h") {
+            Write-Host "✓ Found in source installation"
+        }
 
     - name: Build RustDesk
       run: |
-        # 设置链接器标志
-        $env:RUSTFLAGS = "-L D:\vcpkg\installed\x64-windows-static\lib"
-        
-        # 检查头文件是否存在
-        Write-Host "Checking for opus headers..."
-        if (Test-Path "D:\vcpkg\installed\x64-windows-static\include\opus\opus_multistream.h") {
-            Write-Host "✓ opus_multistream.h found"
-        }
-        
-        # 构建项目
         cargo build --release --target x86_64-pc-windows-msvc --verbose
 
     - name: Collect artifacts
