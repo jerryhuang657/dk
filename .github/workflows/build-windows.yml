@@ -5,21 +5,11 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:
-
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: full
-  CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG: true
 
 jobs:
   build-windows:
     runs-on: windows-latest
     
-    strategy:
-      matrix:
-        target: [x86_64-pc-windows-msvc]
-
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -35,185 +25,30 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         toolchain: stable
-        target: ${{ matrix.target }}
+        target: x86_64-pc-windows-msvc
         override: true
         profile: minimal
 
-    - name: Install Windows build dependencies
+    - name: Install build dependencies
       run: |
-        choco upgrade -y llvm
-        choco install nasm -y
-        choco install cmake -y --installargs 'ADD_CMAKE_TO_PATH=System'
-        choco install git -y
-        choco install perl -y
-        choco install vcredist140 -y
+        choco install -y llvm
+        choco install -y nasm
+        choco install -y cmake --installargs 'ADD_CMAKE_TO_PATH=System'
 
-    - name: Build Opus from source with multistream support
+    - name: Build with minimal features
       run: |
-        # 下载 Opus 源代码
-        git clone https://github.com/xiph/opus.git D:\opus-src
-        cd D:\opus-src
-        
-        # 创建构建目录
-        mkdir build
-        cd build
-        
-        # 配置和构建 Opus，启用多流支持
-        cmake .. -DCMAKE_INSTALL_PREFIX=D:\opus -DCMAKE_BUILD_TYPE=Release -DOPUS_BUILD_SHARED_LIBRARY=OFF -DOPUS_BUILD_TESTING=OFF
-        cmake --build . --config Release --target install
-        
-        # 创建 opus 子目录并移动头文件
-        New-Item -ItemType Directory -Path "D:\opus\include\opus" -Force
-        Get-ChildItem "D:\opus\include\*.h" | ForEach-Object {
-            Copy-Item $_.FullName -Destination "D:\opus\include\opus\" -Force
-        }
-        
-        # 检查是否有多流头文件
-        Write-Host "Opus include directory contents:"
-        Get-ChildItem "D:\opus\include\opus" -Recurse
+        # 禁用所有有问题的特性，只构建核心功能
+        cargo build --release --target x86_64-pc-windows-msvc --no-default-features --features "flutter" --verbose
 
-    - name: Install other dependencies via vcpkg
+    - name: Collect artifacts
       run: |
-        # 安装 vcpkg
-        git clone https://github.com/microsoft/vcpkg.git D:\vcpkg
-        cd D:\vcpkg
-        .\bootstrap-vcpkg.bat -disableMetrics
-        
-        # 安装其他必要的库
-        .\vcpkg install libyuv:x64-windows-static
-        .\vcpkg install libvpx:x64-windows-static
-        .\vcpkg install aom:x64-windows-static
-        
-        .\vcpkg integrate install
-        
-        echo "VCPKG_ROOT=D:\vcpkg" >> $env:GITHUB_ENV
-
-    - name: Create proper library directory structure
-      run: |
-        # 为其他库创建目录结构
-        $vcpkgDir = "D:\vcpkg\installed\x64-windows-static"
-        $includeDir = "$vcpkgDir\include"
-        
-        # 创建 vpx 子目录
-        New-Item -ItemType Directory -Path "$includeDir\vpx" -Force
-        Get-ChildItem "$includeDir\*.h" | Where-Object { $_.Name -like "vpx*" } | ForEach-Object {
-            Copy-Item $_.FullName -Destination "$includeDir\vpx\" -Force
-        }
-        
-        # 创建 libyuv 子目录
-        New-Item -ItemType Directory -Path "$includeDir\libyuv" -Force
-        Get-ChildItem "$includeDir\*.h" | Where-Object { $_.Name -like "*yuv*" } | ForEach-Object {
-            Copy-Item $_.FullName -Destination "$includeDir\libyuv\" -Force
-        }
-        
-        # 创建 aom 子目录
-        New-Item -ItemType Directory -Path "$includeDir\aom" -Force
-        Get-ChildItem "$includeDir\*.h" | Where-Object { $_.Name -like "aom*" } | ForEach-Object {
-            Copy-Item $_.FullName -Destination "$includeDir\aom\" -Force
-        }
-
-    - name: Patch magnum-opus build script
-      run: |
-        # 找到 magnum-opus 目录
-        $magnumOpusPath = "$env:USERPROFILE\.cargo\git\checkouts\magnum-opus-*"
-        $magnumOpusDir = Get-ChildItem -Path $magnumOpusPath -Directory | Select-Object -First 1
-        
-        if ($magnumOpusDir) {
-            $buildScript = Join-Path $magnumOpusDir.FullName "build.rs"
-            if (Test-Path $buildScript) {
-                # 备份原始文件
-                Copy-Item $buildScript "$buildScript.backup"
-                
-                # 读取内容
-                $content = Get-Content $buildScript -Raw
-                
-                # 替换硬编码的路径
-                $newContent = $content -replace "C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\\\\VC\\\\vcpkg\\\\installed\\\\x64-windows-static", "D:\\\\opus"
-                
-                Set-Content $buildScript $newContent
-                Write-Host "Patched magnum-opus build script"
-            }
-        }
-
-    - name: Setup environment variables for Opus
-      run: |
-        echo "OPUS_ROOT=D:\opus" >> $env:GITHUB_ENV
-        echo "LIBRARY_PATH=D:\opus\lib;$env:LIBRARY_PATH" >> $env:GITHUB_ENV
-        echo "C_INCLUDE_PATH=D:\opus\include;$env:C_INCLUDE_PATH" >> $env:GITHUB_ENV
-        echo "CPLUS_INCLUDE_PATH=D:\opus\include;$env:CPLUS_INCLUDE_PATH" >> $env:GITHUB_ENV
-
-    - name: Setup Flutter
-      uses: subosito/flutter-action@v2
-      with:
-        channel: stable
-        flutter-version: '3.19.5'
-
-    - name: Find Flutter project directory
-      run: |
-        $flutterDirs = Get-ChildItem -Recurse -Filter "pubspec.yaml" | Select-Object -First 1
-        if ($flutterDirs) {
-          $flutterDir = $flutterDirs.Directory.FullName
-          echo "FLUTTER_DIR=$flutterDir" >> $env:GITHUB_ENV
-        }
-
-    - name: Install Flutter dependencies
-      if: env.FLUTTER_DIR != null
-      run: |
-        cd $env:FLUTTER_DIR
-        flutter pub get
-
-    - name: Build RustDesk with custom Opus
-      run: |
-        # 设置 Rust 链接器标志
-        $env:RUSTFLAGS = "-L D:\opus\lib -l static=opus"
-        
-        Write-Host "Building with custom Opus installation..."
-        
-        # 检查头文件
-        if (Test-Path "D:\opus\include\opus\opus_multistream.h") {
-            Write-Host "✓ opus_multistream.h found"
-        } else {
-            Write-Host "Available opus headers:"
-            Get-ChildItem "D:\opus\include\opus" | ForEach-Object { Write-Host "  $($_.Name)" }
-        }
-        
-        # 构建项目，启用音频特性
-        cargo build --release --target ${{ matrix.target }} --features "use_dasp" --verbose
-
-    - name: Alternative build without audio
-      if: failure()
-      run: |
-        Write-Host "Trying build without audio features..."
-        cargo clean
-        
-        # 禁用音频相关特性
-        cargo build --release --target ${{ matrix.target }} --no-default-features --features "flutter" --verbose
-
-    - name: Collect build artifacts
-      if: success()
-      run: |
-        $artifactDir = "artifacts"
-        New-Item -ItemType Directory -Path $artifactDir -Force
-        
-        $releaseDir = "target\${{ matrix.target }}\release"
-        
-        Get-ChildItem $releaseDir -Filter "*.exe" | ForEach-Object {
-            Copy-Item $_.FullName -Destination "$artifactDir\$($_.Name)"
-        }
-        Get-ChildItem $releaseDir -Filter "*.dll" | ForEach-Object {
-            Copy-Item $_.FullName -Destination "$artifactDir\$($_.Name)"
-        }
+        mkdir artifacts
+        Copy-Item "target\x86_64-pc-windows-msvc\release\rustdesk.exe" -Destination "artifacts\" -ErrorAction SilentlyContinue
+        Copy-Item "target\x86_64-pc-windows-msvc\release\*.dll" -Destination "artifacts\" -ErrorAction SilentlyContinue
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: rustdesk-windows-${{ matrix.target }}
+        name: rustdesk-windows
         path: artifacts/
         if-no-files-found: warn
-
-    - name: Show build summary
-      run: |
-        Write-Host "=== Build Summary ==="
-        Write-Host "Target: ${{ matrix.target }}"
-        Write-Host "Rust version: $(rustc --version)"
-        Write-Host "Build status: $(if (Test-Path 'artifacts\*.exe') {'SUCCESS'} else {'FAILED'})"
