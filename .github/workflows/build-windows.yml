@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ main, master ]
 
+env:
+  RUST_BACKTRACE: full
+  VCPKG_ROOT: D:\vcpkg
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -16,7 +20,7 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Setup MSVC build environment
+    - name: Setup MSVC
       uses: ilammy/msvc-dev-cmd@v1
       with:
         arch: x64
@@ -27,18 +31,73 @@ jobs:
         toolchain: stable
         target: x86_64-pc-windows-msvc
         override: true
-        profile: minimal
 
-    - name: Install build dependencies
+    - name: Install build tools
       run: |
         choco install -y llvm
         choco install -y nasm
         choco install -y cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+        choco install -y git
 
-    - name: Build with minimal features
+    - name: Install vcpkg and Opus
       run: |
-        # 禁用所有有问题的特性，只构建核心功能
-        cargo build --release --target x86_64-pc-windows-msvc --no-default-features --features "flutter" --verbose
+        # 安装 vcpkg
+        git clone https://github.com/microsoft/vcpkg.git D:\vcpkg
+        cd D:\vcpkg
+        .\bootstrap-vcpkg.bat -disableMetrics
+        
+        # 安装 Opus 并启用多流支持
+        .\vcpkg install opus[multistream]:x64-windows-static
+        
+        # 创建正确的目录结构
+        $vcpkgDir = "D:\vcpkg\installed\x64-windows-static"
+        $includeDir = "$vcpkgDir\include"
+        
+        # 创建 opus 子目录
+        New-Item -ItemType Directory -Path "$includeDir\opus" -Force
+        Get-ChildItem "$includeDir\*.h" | Where-Object { $_.Name -like "opus*" } | ForEach-Object {
+            Copy-Item $_.FullName -Destination "$includeDir\opus\" -Force
+        }
+
+    - name: Patch magnum-opus build script
+      run: |
+        # 找到 magnum-opus 目录
+        $magnumOpusDir = Get-ChildItem -Path "$env:USERPROFILE\.cargo\git\checkouts\magnum-opus-*" -Directory | Select-Object -First 1
+        
+        if ($magnumOpusDir) {
+            $buildScript = Join-Path $magnumOpusDir.FullName "build.rs"
+            if (Test-Path $buildScript) {
+                # 备份
+                Copy-Item $buildScript "$buildScript.backup"
+                
+                # 读取并替换路径
+                $content = Get-Content $buildScript -Raw
+                $newContent = $content -replace "C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\\\\VC\\\\vcpkg\\\\installed\\\\x64-windows-static", "D:\\\\vcpkg\\\\installed\\\\x64-windows-static"
+                
+                Set-Content $buildScript $newContent
+                Write-Host "Successfully patched magnum-opus build script"
+            }
+        }
+
+    - name: Set environment variables
+      run: |
+        echo "VCPKGRS_DYNAMIC=1" >> $env:GITHUB_ENV
+        echo "LIBRARY_PATH=D:\vcpkg\installed\x64-windows-static\lib" >> $env:GITHUB_ENV
+        echo "C_INCLUDE_PATH=D:\vcpkg\installed\x64-windows-static\include" >> $env:GITHUB_ENV
+
+    - name: Build RustDesk
+      run: |
+        # 设置链接器标志
+        $env:RUSTFLAGS = "-L D:\vcpkg\installed\x64-windows-static\lib"
+        
+        # 检查头文件是否存在
+        Write-Host "Checking for opus headers..."
+        if (Test-Path "D:\vcpkg\installed\x64-windows-static\include\opus\opus_multistream.h") {
+            Write-Host "✓ opus_multistream.h found"
+        }
+        
+        # 构建项目
+        cargo build --release --target x86_64-pc-windows-msvc --verbose
 
     - name: Collect artifacts
       run: |
