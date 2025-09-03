@@ -34,8 +34,8 @@ jobs:
 
     - name: Install Windows build dependencies
       run: |
-        choco install -y llvm
-        choco install -y vcredist2019
+        choco upgrade -y llvm
+        choco vcredist140 -y vcredist140
 
     - name: Setup Flutter (RustDesk 需要)
       uses: subosito/flutter-action@v2
