@@ -24,6 +24,11 @@ jobs:
       with:
         submodules: recursive # RustDesk 可能有子模块
 
+    - name: Setup MSVC build environment
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
     - name: Setup Rust
       uses: actions-rs/toolchain@v1
       with:
@@ -35,27 +40,121 @@ jobs:
     - name: Install Windows build dependencies
       run: |
         choco upgrade -y llvm
-        choco install vcredist-all -y
+        choco install nasm -y
+        choco install cmake -y --installargs 'ADD_CMAKE_TO_PATH=System'
+        # 安装 Visual C++ 运行时（使用正确的包名）
+        choco install vcredist140 -y
+        choco install vcredist2015-2022 -y
 
     - name: Setup Flutter (RustDesk 需要)
       uses: subosito/flutter-action@v2
       with:
         channel: stable
+        flutter-version: '3.19.5' # 指定一个稳定的版本
 
-    - name: Install Flutter dependencies
+    - name: Find Flutter project directory
+      id: find-flutter
       run: |
+        # 查找包含 pubspec.yaml 的目录
+        $flutterDirs = Get-ChildItem -Recurse -Filter "pubspec.yaml" | Select-Object -First 1
+        if ($flutterDirs) {
+          $flutterDir = $flutterDirs.Directory.FullName
+          Write-Host "Found Flutter project at: $flutterDir"
+          echo "FLUTTER_DIR=$flutterDir" >> $env:GITHUB_ENV
+        } else {
+          Write-Host "No pubspec.yaml found, checking for lib/main.dart"
+          $dartDirs = Get-ChildItem -Recurse -Filter "main.dart" | Where-Object { $_.Directory.Name -eq "lib" } | Select-Object -First 1
+          if ($dartDirs) {
+            $flutterDir = $dartDirs.Directory.Parent.FullName
+            Write-Host "Found Flutter project at: $flutterDir"
+            echo "FLUTTER_DIR=$flutterDir" >> $env:GITHUB_ENV
+          } else {
+            Write-Host "No Flutter project found, continuing without Flutter"
+          }
+        }
+
+    - name: Install Flutter dependencies (如果找到Flutter项目)
+      if: env.FLUTTER_DIR != null
+      run: |
+        cd $env:FLUTTER_DIR
         flutter pub get
+        flutter --version
+
+    - name: Configure LLVM path
+      run: |
+        $llvmPath = "C:\Program Files\LLVM\bin"
+        if (Test-Path $llvmPath) {
+          echo "LLVM_PATH=$llvmPath" >> $env:GITHUB_ENV
+          $env:PATH = "$llvmPath;$env:PATH"
+          Write-Host "Added LLVM to PATH: $llvmPath"
+        } else {
+          Write-Host "LLVM path not found, checking alternative locations"
+          $alternativePaths = @(
+            "C:\Program Files\LLVM",
+            "C:\tools\llvm"
+          )
+          foreach ($path in $alternativePaths) {
+            if (Test-Path $path) {
+              $binPath = "$path\bin"
+              echo "LLVM_PATH=$binPath" >> $env:GITHUB_ENV
+              $env:PATH = "$binPath;$env:PATH"
+              Write-Host "Added LLVM to PATH: $binPath"
+              break
+            }
+          }
+        }
 
     - name: Build RustDesk
       run: |
-        $env:PATH += ";C:\Program Files\LLVM\bin"
-        cargo build --release --target ${{ matrix.target }}
+        # 确保 LLVM 在 PATH 中
+        if ($env:LLVM_PATH) {
+          $env:PATH = "$env:LLVM_PATH;$env:PATH"
+        }
         
+        # 显示构建环境信息
+        cl.exe
+        link.exe
+        rustc --version
+        cargo --version
+        
+        # 构建项目
+        cargo build --release --target ${{ matrix.target }} --verbose
+        
+        # 检查构建结果
+        if (Test-Path "target\${{ matrix.target }}\release\rustdesk.exe") {
+          Write-Host "Build successful! Binary found."
+        } else {
+          Write-Host "Build may have failed or binary has different name"
+          Get-ChildItem "target\${{ matrix.target }}\release\" -Filter "*.exe"
+        }
+
     - name: Collect build artifacts
       run: |
-        mkdir artifacts
-        Copy-Item "target\${{ matrix.target }}\release\rustdesk.exe" -Destination "artifacts\rustdesk.exe"
-        Copy-Item "target\${{ matrix.target }}\release\rustdesk.*" -Destination "artifacts\" -Include "*.dll", "*.pdb"
+        $artifactDir = "artifacts"
+        New-Item -ItemType Directory -Path $artifactDir -Force
+        
+        $releaseDir = "target\${{ matrix.target }}\release"
+        
+        # 复制可执行文件
+        if (Test-Path "$releaseDir\rustdesk.exe") {
+          Copy-Item "$releaseDir\rustdesk.exe" -Destination "$artifactDir\rustdesk.exe"
+        }
+        
+        # 复制可能的其他可执行文件
+        Get-ChildItem $releaseDir -Filter "*.exe" | ForEach-Object {
+          if ($_.Name -ne "rustdesk.exe") {
+            Copy-Item $_.FullName -Destination "$artifactDir\$($_.Name)"
+          }
+        }
+        
+        # 复制 DLL 文件
+        Get-ChildItem $releaseDir -Filter "*.dll" | ForEach-Object {
+          Copy-Item $_.FullName -Destination "$artifactDir\$($_.Name)"
+        }
+        
+        # 显示收集的文件
+        Write-Host "Collected artifacts:"
+        Get-ChildItem $artifactDir
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
@@ -63,3 +162,17 @@ jobs:
         name: rustdesk-windows-${{ matrix.target }}
         path: artifacts/
         if-no-files-found: error
+
+    - name: Show build summary
+      run: |
+        Write-Host "=== Build Summary ==="
+        Write-Host "Target: ${{ matrix.target }}"
+        Write-Host "Rust version: $(rustc --version)"
+        Write-Host "Cargo version: $(cargo --version)"
+        if ($env:FLUTTER_DIR) {
+          Write-Host "Flutter project found at: $env:FLUTTER_DIR"
+          Write-Host "Flutter version: $(flutter --version)"
+        } else {
+          Write-Host "No Flutter project found"
+        }
+        Write-Host "Artifacts uploaded: rustdesk-windows-${{ matrix.target }}"
