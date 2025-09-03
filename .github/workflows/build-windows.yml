@@ -59,7 +59,6 @@ jobs:
         .\vcpkg install opus:x64-windows-static
         .\vcpkg install libyuv:x64-windows-static
         .\vcpkg install libvpx:x64-windows-static
-        .\vcpkg install libvpx:x64-windows-static-md
         
         # 集成到系统
         .\vcpkg integrate install
@@ -86,30 +85,6 @@ jobs:
         }
         
         Write-Host "Created library directory structure"
-        Write-Host "vpx directory contents:"
-        Get-ChildItem "$vpxIncludeDir\vpx"
-        Write-Host "libyuv directory contents:"
-        Get-ChildItem "$vpxIncludeDir\libyuv"
-
-    - name: Create patch file for scrap build script
-      run: |
-        # 创建一个补丁文件来修改 scrap 构建脚本
-        $patchContent = @'
-// Fallback logic for GitHub Actions
-if !Path::new("D:\\\\vcpkg\\\\installed\\\\x64-windows-static\\\\include\\\\vpx\\\\vpx.h").exists() {
-    // Try to find libraries in alternative locations
-    if let Ok(alt_path) = std::env::var("VCPKG_ROOT") {
-        let alt_include = format!("{}\\\\installed\\\\x64-windows-static\\\\include", alt_path);
-        let alt_lib = format!("{}\\\\installed\\\\x64-windows-static\\\\lib", alt_path);
-        
-        if Path::new(&alt_include).exists() {
-            println!("cargo:include={}", alt_include);
-            println!("cargo:rustc-link-search={}", alt_lib);
-        }
-    }
-}
-'@
-        Set-Content -Path "patch_code.rs" -Value $patchContent
 
     - name: Patch scrap build script
       run: |
@@ -125,10 +100,6 @@ if !Path::new("D:\\\\vcpkg\\\\installed\\\\x64-windows-static\\\\include\\\\vpx\
             # 替换硬编码的 vcpkg 路径
             $newContent = $content -replace "C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\\\\VC\\\\vcpkg\\\\installed\\\\x64-windows-static", "D:\\\\vcpkg\\\\installed\\\\x64-windows-static"
             
-            # 在适当的位置插入回退逻辑
-            $patchCode = Get-Content "patch_code.rs" -Raw
-            $newContent = $newContent -replace "(fn link_homebrew_m1\(\) -> Result<\(\)> \{)", "`$1`n`n    $patchCode`n"
-            
             Set-Content $scrapBuildScript $newContent
             Write-Host "Patched scrap build script"
         }
@@ -139,8 +110,6 @@ if !Path::new("D:\\\\vcpkg\\\\installed\\\\x64-windows-static\\\\include\\\\vpx\
         echo "LIBRARY_PATH=$vcpkgDir\lib;$env:LIBRARY_PATH" >> $env:GITHUB_ENV
         echo "C_INCLUDE_PATH=$vcpkgDir\include;$env:C_INCLUDE_PATH" >> $env:GITHUB_ENV
         echo "CPLUS_INCLUDE_PATH=$vcpkgDir\include;$env:CPLUS_INCLUDE_PATH" >> $env:GITHUB_ENV
-        
-        # 设置库特定的变量
         echo "PKG_CONFIG_PATH=$vcpkgDir\lib\pkgconfig;$env:PKG_CONFIG_PATH" >> $env:GITHUB_ENV
 
     - name: Setup Flutter
@@ -176,41 +145,21 @@ if !Path::new("D:\\\\vcpkg\\\\installed\\\\x64-windows-static\\\\include\\\\vpx\
         $env:RUSTFLAGS = "-L D:\vcpkg\installed\x64-windows-static\lib"
         
         Write-Host "Building with vcpkg libraries..."
-        Write-Host "Library path: $env:LIBRARY_PATH"
-        Write-Host "Include path: $env:C_INCLUDE_PATH"
         
         # 检查必要的头文件
         $vcpkgInclude = "D:\vcpkg\installed\x64-windows-static\include"
-        Write-Host "Checking for vpx/vp8.h..."
         if (Test-Path "$vcpkgInclude\vpx\vp8.h") {
             Write-Host "vpx/vp8.h found!"
-        } else {
-            Write-Host "Available vpx headers:"
-            Get-ChildItem "$vcpkgInclude\vpx" -Filter "*.h" | ForEach-Object { Write-Host "  $($_.Name)" }
         }
         
         # 构建项目
         cargo build --release --target ${{ matrix.target }} --verbose
 
-    - name: Alternative build with system libraries
+    - name: Alternative build approach
       if: failure()
       run: |
-        Write-Host "Trying alternative approach with system libraries..."
-        
-        # 安装系统版本的库
-        choco install libvpx -y
-        choco install libyuv -y
-        
-        # 清理并重新构建
+        Write-Host "Trying alternative approach..."
         cargo clean
-        cargo build --release --target ${{ matrix.target }} --verbose
-
-    - name: Final build attempt with simplified approach
-      if: failure()
-      run: |
-        Write-Host "Final attempt: trying to build without specific features..."
-        
-        # 尝试使用更简单的构建方式
         cargo build --release --target ${{ matrix.target }} --no-default-features --verbose
 
     - name: Collect build artifacts
@@ -227,8 +176,6 @@ if !Path::new("D:\\\\vcpkg\\\\installed\\\\x64-windows-static\\\\include\\\\vpx\
         Get-ChildItem $releaseDir -Filter "*.dll" | ForEach-Object {
             Copy-Item $_.FullName -Destination "$artifactDir\$($_.Name)"
         }
-        
-        Write-Host "Build artifacts collected"
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
