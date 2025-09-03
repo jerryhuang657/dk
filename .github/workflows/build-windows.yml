@@ -47,6 +47,8 @@ jobs:
         choco install git -y
         choco install perl -y
         choco install vcredist140 -y
+        # 安装音频处理相关的依赖
+        choco install libsamplerate -y
 
     - name: Install vcpkg and all required dependencies
       run: |
@@ -128,39 +130,42 @@ jobs:
           echo "LLVM_PATH=$llvmPath" >> $env:GITHUB_ENV
         }
 
-    - name: Build RustDesk with vcpkg libraries
+    - name: Build RustDesk with audio features enabled
       run: |
         # 设置 Rust 链接器标志
         $env:RUSTFLAGS = "-L D:\vcpkg\installed\x64-windows-static\lib"
         
-        Write-Host "Building with vcpkg libraries..."
+        Write-Host "Building with audio resampling features..."
         
-        # 检查必要的头文件
-        $vcpkgInclude = "D:\vcpkg\installed\x64-windows-static\include"
-        Write-Host "Checking for required headers:"
-        if (Test-Path "$vcpkgInclude\vpx\vp8.h") { Write-Host "✓ vpx/vp8.h found" }
-        if (Test-Path "$vcpkgInclude\aom\aom.h") { Write-Host "✓ aom/aom.h found" }
-        if (Test-Path "$vcpkgInclude\libyuv\libyuv.h") { Write-Host "✓ libyuv/libyuv.h found" }
-        
-        # 构建项目
-        cargo build --release --target ${{ matrix.target }} --verbose
+        # 启用音频重采样特性
+        cargo build --release --target ${{ matrix.target }} --features "use_dasp" --verbose
 
-    - name: Alternative build approach - skip scrap features
+    - name: Alternative build with samplerate feature
       if: failure()
       run: |
-        Write-Host "Trying alternative approach: skipping scrap features..."
+        Write-Host "Trying alternative approach: using samplerate feature..."
         cargo clean
         
-        # 尝试禁用 scrap 相关的特性
-        cargo build --release --target ${{ matrix.target }} --no-default-features --verbose
+        # 尝试使用 samplerate 替代 dasp
+        cargo build --release --target ${{ matrix.target }} --features "use_samplerate" --verbose
 
-    - name: Final attempt - build without video features
+    - name: Build without audio resampling
       if: failure()
       run: |
-        Write-Host "Final attempt: building without video capture features..."
+        Write-Host "Building without audio resampling features..."
+        cargo clean
         
-        # 尝试跳过所有视频相关的依赖
-        cargo build --release --target ${{ matrix.target }} --features " --no-default-features" --verbose
+        # 禁用音频重采样特性
+        cargo build --release --target ${{ matrix.target }} --no-default-features --features "flutter" --verbose
+
+    - name: Final attempt - minimal build
+      if: failure()
+      run: |
+        Write-Host "Final attempt: minimal build with only essential features..."
+        cargo clean
+        
+        # 只启用最基本的特性
+        cargo build --release --target ${{ matrix.target }} --no-default-features --features "cli" --verbose
 
     - name: Collect build artifacts
       if: success()
