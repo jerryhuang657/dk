@@ -149,19 +149,8 @@ jobs:
         $pkgConfigDir = "$env:USERPROFILE\pkgconfig"
         New-Item -ItemType Directory -Path $pkgConfigDir -Force
         
-        $opusPcContent = @"
-prefix=$opusPath
-exec_prefix=`${prefix}
-libdir=`${prefix}/lib
-includedir=`${prefix}/include
-
-Name: opus
-Description: Opus codec library
-Version: 1.3.1
-Requires:
-Libs: -L`${libdir} -lopus
-Cflags: -I`${includedir}
-"@
+        # 使用单行字符串避免多行字符串的格式问题
+        $opusPcContent = "prefix=$opusPath`nexec_prefix=`${prefix}`nlibdir=`${prefix}/lib`nincludedir=`${prefix}/include`n`nName: opus`nDescription: Opus codec library`nVersion: 1.3.1`nRequires:`nLibs: -L`${libdir} -lopus`nCflags: -I`${includedir}"
         
         Set-Content -Path "$pkgConfigDir\opus.pc" -Value $opusPcContent
         echo "PKG_CONFIG_PATH=$pkgConfigDir" >> $env:GITHUB_ENV
