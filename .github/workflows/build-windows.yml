@@ -97,19 +97,29 @@ jobs:
 
     - name: Patch magnum-opus build script
       run: |
-        # 找到 magnum-opus 目录
-        $magnumOpusDir = Get-ChildItem -Path "$env:USERPROFILE\.cargo\git\checkouts\magnum-opus-*" -Directory | Select-Object -First 1
+        # 首先构建项目来下载依赖
+        cargo fetch
+        
+        # 查找 magnum-opus 在 cargo 注册表中的位置
+        $magnumOpusDir = Get-ChildItem -Path "$env:USERPROFILE\.cargo\registry\src" -Recurse -Directory -Filter "magnum-opus-*" | Select-Object -First 1
+        
+        if (-not $magnumOpusDir) {
+            # 如果在 registry 中没找到，尝试在 git 依赖中查找
+            $magnumOpusDir = Get-ChildItem -Path "$env:USERPROFILE\.cargo\git\checkouts" -Recurse -Directory -Filter "magnum-opus-*" | Select-Object -First 1
+        }
         
         if ($magnumOpusDir) {
+            Write-Host "Found magnum-opus at: $($magnumOpusDir.FullName)"
             $buildScript = Join-Path $magnumOpusDir.FullName "build.rs"
+            
             if (Test-Path $buildScript) {
                 # 备份
                 Copy-Item $buildScript "$buildScript.backup"
                 
-                # 读取并替换路径
+                # 读取内容
                 $content = Get-Content $buildScript -Raw
                 
-                # 替换硬编码的路径
+                # 替换硬编码的 vcpkg 路径
                 $newContent = $content -replace "C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\\\\VC\\\\vcpkg\\\\installed\\\\x64-windows-static", "D:\\\\vcpkg\\\\installed\\\\x64-windows-static"
                 
                 # 如果从源码构建了 Opus，使用那个路径
@@ -119,8 +129,42 @@ jobs:
                 
                 Set-Content $buildScript $newContent
                 Write-Host "Successfully patched magnum-opus build script"
+            } else {
+                Write-Host "build.rs not found in magnum-opus directory"
             }
+        } else {
+            Write-Host "magnum-opus directory not found, skipping patch"
         }
+
+    - name: Set pkg-config environment
+      run: |
+        # 设置 pkg-config 环境变量
+        if (Test-Path "D:\opus\include\opus\opus_multistream.h") {
+            $opusPath = "D:\opus"
+        } else {
+            $opusPath = "D:\vcpkg\installed\x64-windows-static"
+        }
+        
+        # 创建 pkg-config 文件
+        $pkgConfigDir = "$env:USERPROFILE\pkgconfig"
+        New-Item -ItemType Directory -Path $pkgConfigDir -Force
+        
+        $opusPcContent = @"
+prefix=$opusPath
+exec_prefix=`${prefix}
+libdir=`${prefix}/lib
+includedir=`${prefix}/include
+
+Name: opus
+Description: Opus codec library
+Version: 1.3.1
+Requires:
+Libs: -L`${libdir} -lopus
+Cflags: -I`${includedir}
+"@
+        
+        Set-Content -Path "$pkgConfigDir\opus.pc" -Value $opusPcContent
+        echo "PKG_CONFIG_PATH=$pkgConfigDir" >> $env:GITHUB_ENV
 
     - name: Set final environment variables
       run: |
